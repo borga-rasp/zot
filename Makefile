@@ -28,8 +28,8 @@ CRICTL_VERSION := v1.26.1
 ACTION_VALIDATOR := $(TOOLSDIR)/bin/action-validator
 ACTION_VALIDATOR_VERSION := v0.5.3
 ZUI_BUILD_PATH := ""
-ZUI_VERSION := commit-89a04ea
-ZUI_REPO_OWNER := project-zot
+ZUI_VERSION := ""
+ZUI_REPO_OWNER := borga-rasp
 ZUI_REPO_NAME := zui
 SWAGGER_VERSION := v1.16.6
 STACKER := $(TOOLSDIR)/bin/stacker
@@ -630,7 +630,7 @@ ui:
 		pwd=$$(pwd);\
 		tdir=$$(mktemp -d);\
 		cd $$tdir;\
-		git clone https://github.com/$(ZUI_REPO_OWNER)/$(ZUI_REPO_NAME).git zui;\
+		git clone git@github.com:borga-rasp/zui.git zui;\
 		cd zui;\
 		npm install;\
 		npm run build;\
