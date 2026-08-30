@@ -1400,43 +1400,121 @@ func extractMTLSIdentity(cert *x509.Certificate, mtlsConfig *config.MTLSConfig) 
 	return "", fmt.Errorf("no identity found in any configured identity attributes: %w", cummulatedErr)
 }
 
-func loadPublicKeyFromFile(path string) (crypto.PublicKey, error) {
+// Keyring stores multiple trusted public keys indexed by Key ID (kid) and fingerprint.
+type Keyring struct {
+	Keys   []crypto.PublicKey
+	KeyMap map[string]crypto.PublicKey
+}
+
+// GetKey returns the matching public key for kid, or falls back to the first key in the keyring.
+func (kr *Keyring) GetKey(kid string) crypto.PublicKey {
+	if kr == nil || len(kr.Keys) == 0 {
+		return nil
+	}
+	if kid != "" && kr.KeyMap != nil {
+		if k, ok := kr.KeyMap[kid]; ok {
+			return k
+		}
+	}
+	// Fallback to first trusted key
+	return kr.Keys[0]
+}
+
+// ComputePublicKeyID computes a 32-character hex SHA-256 fingerprint of the PKIX DER public key.
+func ComputePublicKeyID(pub crypto.PublicKey) string {
+	der, err := x509.MarshalPKIXPublicKey(pub)
+	if err != nil {
+		return ""
+	}
+	hash := sha256.Sum256(der)
+	return hex.EncodeToString(hash[:16])
+}
+
+// LoadKeyringFromFile loads trusted public keys from a file (multi-PEM or JWKS).
+func LoadKeyringFromFile(path string) (*Keyring, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w, path %s", zerr.ErrCouldNotLoadPublicKey, err, path)
 	}
 
-	return loadPublicKeyFromBytes(raw)
+	return LoadKeyringFromBytes(raw)
+}
+
+// LoadKeyringFromBytes parses multi-PEM blocks or JWKS into a Keyring.
+func LoadKeyringFromBytes(raw []byte) (*Keyring, error) {
+	kr := &Keyring{
+		Keys:   make([]crypto.PublicKey, 0),
+		KeyMap: make(map[string]crypto.PublicKey),
+	}
+
+	// 1. Try JWKS format
+	var keySet jose.JSONWebKeySet
+	if err := json.Unmarshal(raw, &keySet); err == nil && len(keySet.Keys) > 0 {
+		for _, jwk := range keySet.Keys {
+			if jwk.Key != nil {
+				kr.Keys = append(kr.Keys, jwk.Key)
+				computedID := ComputePublicKeyID(jwk.Key)
+				if computedID != "" {
+					kr.KeyMap[computedID] = jwk.Key
+				}
+				if jwk.KeyID != "" {
+					kr.KeyMap[jwk.KeyID] = jwk.Key
+				}
+			}
+		}
+		if len(kr.Keys) > 0 {
+			return kr, nil
+		}
+	}
+
+	// 2. Try multi-PEM format (decodes all PEM blocks sequentially)
+	rest := raw
+	for len(rest) > 0 {
+		var block *pem.Block
+		block, rest = pem.Decode(rest)
+		if block == nil {
+			break
+		}
+
+		pemBytes := block.Bytes
+		var pubKey crypto.PublicKey
+
+		if cert, err := x509.ParseCertificate(pemBytes); err == nil {
+			pubKey = cert.PublicKey
+		} else if key, err := x509.ParsePKIXPublicKey(pemBytes); err == nil {
+			pubKey = key
+		} else if key, err := x509.ParsePKCS1PublicKey(pemBytes); err == nil {
+			pubKey = key
+		}
+
+		if pubKey != nil {
+			kr.Keys = append(kr.Keys, pubKey)
+			computedID := ComputePublicKeyID(pubKey)
+			if computedID != "" {
+				kr.KeyMap[computedID] = pubKey
+			}
+		}
+	}
+
+	if len(kr.Keys) == 0 {
+		return nil, fmt.Errorf("%w: no valid x509 certificate, public key, or JWKS found", zerr.ErrCouldNotLoadPublicKey)
+	}
+
+	return kr, nil
+}
+
+func loadPublicKeyFromFile(path string) (crypto.PublicKey, error) {
+	kr, err := LoadKeyringFromFile(path)
+	if err != nil {
+		return nil, err
+	}
+	return kr.Keys[0], nil
 }
 
 func loadPublicKeyFromBytes(raw []byte) (crypto.PublicKey, error) {
-	var keySet jose.JSONWebKeySet
-	if err := json.Unmarshal(raw, &keySet); err == nil {
-		if len(keySet.Keys) != 1 {
-			return nil, fmt.Errorf("%w: expected 1 key in JWKS, found %d", zerr.ErrCouldNotLoadPublicKey, len(keySet.Keys))
-		}
-
-		return keySet.Keys[0].Key, nil
+	kr, err := LoadKeyringFromBytes(raw)
+	if err != nil {
+		return nil, err
 	}
-
-	block, _ := pem.Decode(raw)
-	if block == nil {
-		return nil, fmt.Errorf("%w: no valid PEM data found", zerr.ErrCouldNotLoadPublicKey)
-	}
-
-	pemBytes := block.Bytes
-
-	if cert, err := x509.ParseCertificate(pemBytes); err == nil {
-		return cert.PublicKey, nil
-	}
-
-	if key, err := x509.ParsePKIXPublicKey(pemBytes); err == nil {
-		return key, nil
-	}
-
-	if key, err := x509.ParsePKCS1PublicKey(pemBytes); err == nil {
-		return key, nil
-	}
-
-	return nil, fmt.Errorf("%w: no valid x509 certificate or public key found", zerr.ErrCouldNotLoadPublicKey)
+	return kr.Keys[0], nil
 }

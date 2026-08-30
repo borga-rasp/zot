@@ -54,17 +54,26 @@ func NewBearerAuth(authConfig *config.AuthConfig, logger log.Logger) *BearerAuth
 
 	var traditionalAuthorizerKeyFunc BearerAuthorizerKeyFunc
 
-	// Traditional bearer auth with public key/certificate.
+	// Traditional bearer auth with public key/certificate or multi-key bundle.
 	if authConfig.Bearer.Cert != "" {
-		// although the configuration option is called 'cert', this function will also parse a public key directly
-		// see https://github.com/project-zot/zot/issues/3173 for info
-		publicKey, err := loadPublicKeyFromFile(authConfig.Bearer.Cert)
+		// Load keyring supporting single-PEM, multi-PEM bundle, or JWKS
+		keyring, err := LoadKeyringFromFile(authConfig.Bearer.Cert)
 		if err != nil {
 			logger.Panic().Err(err).Msg("failed to load public key for bearer authentication")
 		}
 
-		traditionalAuthorizerKeyFunc = func(_ context.Context, _ *jwt.Token) (any, error) {
-			return publicKey, nil
+		traditionalAuthorizerKeyFunc = func(_ context.Context, token *jwt.Token) (any, error) {
+			var kid string
+			if token != nil && token.Header != nil {
+				if kidVal, ok := token.Header["kid"]; ok && kidVal != nil {
+					kid = fmt.Sprintf("%v", kidVal)
+				}
+			}
+			key := keyring.GetKey(kid)
+			if key == nil {
+				return nil, fmt.Errorf("no matching public key found for kid %q in keyring", kid)
+			}
+			return key, nil
 		}
 	}
 
